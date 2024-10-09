@@ -1,0 +1,363 @@
+---
+title: "Homework #1: Supervised Learning"
+author: "Kiana Dane"
+format: ds6030hw-html
+editor: 
+  markdown: 
+    wrap: 72
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r config}
+#| include: false
+# Set global configurations and settings here
+knitr::opts_chunk$set()                 # set global chunk options
+ggplot2::theme_set(ggplot2::theme_bw()) # set ggplot2 theme
+```
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages}
+#| message: false
+#| warning: false
+library(tidyverse) 
+library(ggplot2)
+```
+
+# Problem 1: Evaluating a Regression Model
+
+## a. Data generating functions
+
+Create a set of functions to generate data from the following
+distributions:
+
+```{=latex}
+\begin{align*} X &\sim \mathcal{N}(0, 1) \\ Y &= -1 + .5X + .2X^2 + \epsilon \\ \epsilon &\sim \mathcal{N}(0,\, \sigma) \end{align*}
+```
+::: {.callout-note title="Solution"}
+```{r prob1a}
+
+create_x <- function(n) rnorm(n) 
+
+f <- function(x) -1 + 0.5 * x + 0.2 * x^2 
+
+create_y <- function(x, sd) 
+  { n = length(x)
+  f(x) + rnorm(n, mean = 0, sd = sd)
+}
+
+n <- 100 
+sd <- 3
+set.seed(611)
+x <- create_x(n) 
+y <- create_y(x, sd)
+```
+:::
+
+## b. Generate training data
+
+Simulate $n=100$ realizations from these distributions using $\sd=3$.
+Produce a scatterplot and draw the true regression line
+$f(x) = E[Y \mid X=x]$.
+
+-   Use `set.seed(611)` prior to generating the data.
+
+::: {.callout-note title="Solution"}
+```{r prob1b}
+
+created_data <- data.frame(x = x, y = y)
+
+ggplot(created_data, aes(x,y)) + geom_point() + geom_function(fun=f, color="darkgreen")
+```
+:::
+
+## c. Fit three models
+
+Fit three polynomial regression models using least squares: linear,
+quadratic, and cubic. Produce another scatterplot, add the fitted lines
+and true population line $f(x)$ using different colors, and add a legend
+that maps the line color to a model.
+
+-   Note: The true model is quadratic, but we are also fitting linear
+    (less complex) and cubic (more complex) models.
+
+::: {.callout-note title="Solution"}
+```{r prob 1c}
+linear1 = lm(y~x)
+quad1 = lm(y ~ poly(x,2))
+cubic1 = lm(y ~ poly(x,3))
+
+
+x_vals = seq(-3, 3, length=200)
+linear2 = predict(linear1, tibble(x = x_vals))
+quad2 = predict(quad1, tibble(x = x_vals))
+cubic2 = predict(cubic1, tibble(x = x_vals))
+
+```
+
+```{r prob 1c cont}
+prediction = tibble(x = x_vals, 
+                        linear3 = linear2, 
+                        quad3 = quad2,
+                        cubic3 = cubic2,
+                        true = f(x_vals)) %>%
+  pivot_longer(cols = -x,
+               names_to = "model",
+               values_to = "y")
+
+ggplot(tibble(x,y), aes(x,y)) + geom_point() + geom_line(data=prediction, aes(color=model)) + scale_color_manual(values = c(true = "hotpink", linear3 = "purple", quad3 = "lightblue", cubic3 = "orange"))
+
+```
+:::
+
+## d. Predictive performance
+
+Generate a *test data* set of 10,000 observations from the same
+distributions. Use `set.seed(612)` prior to generating the test data.
+
+-   Calculate the estimated mean squared error (MSE) for each model.
+-   Are the results as expected?
+
+::: {.callout-note title="Solution"}
+```{r prob 1d}
+set.seed(612)
+test_n = 10000
+# prediction on 10000 test points
+test_xvals = create_x(test_n)
+test_yvals = create_y(test_xvals, sd = sd)
+
+linear_test = predict(linear1, tibble(x = test_xvals))
+quad_test = predict(quad1, tibble(x = test_xvals))
+cubic_test = predict(cubic1, tibble(x = test_xvals))
+
+testing = data.frame(x = test_xvals, y = test_yvals, linear = linear_test, quad = quad_test, cubic = cubic_test) %>% 
+  pivot_longer(cols=c(-x, -y), names_to = "model", values_to = "MSE") %>% 
+  mutate(model = factor(model, levels=c('linear', 'quad', 'cubic'))) %>%
+  mutate(error = (y - MSE)^2) %>%
+  group_by(model) %>%
+  summarize(error=mean(error))
+
+testing
+
+```
+:::
+
+## e. Optimal performance
+
+What is the best achievable MSE? That is, what is the MSE if the true
+$f(x)$ was used to evaluate the test set? How close does the best method
+come to achieving the optimum?
+
+::: {.callout-note title="Solution"}
+```{r prob 1e}
+calculate_MSE <- function(true_values, predicted_values) {
+  mean((true_values - predicted_values)^2) }
+real_y_test <- f(test_xvals)
+
+best_achievable_MSE <- calculate_MSE(test_yvals, real_y_test)
+
+best_achievable_MSE
+```
+:::
+
+## f. Replication
+
+The MSE scores obtained in part *d* came from one realization of
+training data. Here will we explore how much variation there is in the
+MSE scores by replicating the simulation many times.
+
+-   Re-run parts b. and c. (i.e., generate training data and fit models)
+    100 times.
+    -   Do not generate new testing data
+    -   Use `set.seed(613)` prior to running the simulation and do not
+        set the seed in any other places.
+-   Calculate the test MSE for all simulations.
+    -   Use the same test data from part d. (This question is only about
+        the variability that comes from the *training data*).
+-   Create kernel density or histogram plots of the resulting MSE values
+    for each model.
+
+::: {.callout-note title="Solution"}
+```{r prob 1f}
+sd = 3
+n = 100
+rounds = 100
+
+simtwo <- function(test_xvals, test_yvals){
+  # new training data
+  x = create_x(n)
+  y = create_y(x, sd = sd)
+  
+  # fit three models
+  line_fit = lm(y ~ x)
+  quad_fit = lm(y ~ poly(x,2))
+  cube_fit = lm(y ~ poly(x,3))
+  
+
+  # predict test data
+  line_predict = predict(line_fit, tibble(x = test_xvals))
+  quad_predict = predict(quad_fit, tibble(x = test_xvals))
+  cube_predict = predict(cube_fit, tibble(x = test_xvals))
+  
+  # rank
+  
+score = tibble(x = test_xvals, y = test_yvals, linear = line_predict, quad = quad_predict, cubic = cube_predict) %>%
+  summarize(across(c(-x, -y), ~mean((y - .)^2)))
+return(score)
+}
+```
+:::
+
+```{r prob1f cont}
+set.seed(613)
+results = map(1:rounds, ~ simtwo(test_xvals, test_yvals)) %>% 
+  bind_rows(.id = "round")
+```
+
+```{r 1f cont}
+elongate = results %>%
+  pivot_longer(cols = c("linear", "quad", "cubic"), names_to = "model", values_to = "MSE") %>%
+  mutate(model = factor(model, levels = c("linear", "quad", "cubic")))
+```
+
+```{r 1f plot}
+ggplot(elongate, aes(MSE)) + geom_density(aes(fill=model), alpha=.3) + scale_fill_manual(values=c(linear = "purple", quad = "orange", cubic = "black"))
+
+```
+
+## g. Best model
+
+Show a count of how many times each model was the best. That is, out of
+the 100 simulations, count how many times each model had the lowest MSE.
+
+::: {.callout-note title="Solution"}
+```{r prob 1g}
+elongate %>% 
+  group_by(round) %>%
+    slice_min(MSE) %>%
+  ungroup() %>%
+  count(model) %>%
+  mutate(p = n/sum(n))
+```
+:::
+
+#### The quadratic model provides the best MSE 65 times out of 100.
+
+## h. Function to implement simulation
+
+Write a function that implements the simulation in part *f*. The
+function should have arguments for i) the size of the training data $n$,
+ii) the standard deviation of the random error $\sd$, and iii) the test
+data. Use the same `set.seed(613)`.
+
+::: {.callout-note title="Solution"}
+```{r prob 1h}
+part_h <- function(n, sd, test_data = tibble(x = test_xvals, y = test_yvals), seed = 613, rounds = 100) {
+  if(!is.null(seed)) set.seed(seed)
+  
+out = vector("list", rounds)
+for(i in 1:rounds){
+    x = create_x(n)
+    y = create_y(x, sd = sd)
+    
+    fl = lm(y~x)
+    fq = lm(y~poly(x,2))
+    fc = lm(y~poly(x,3))
+    
+    line_predict = predict(fl, test_data)
+    quad_predict = predict(fq, test_data)
+    cube_predict = predict(fc, test_data)
+    
+    score = test_data %>% 
+      mutate(linear = line_predict, quad = quad_predict, cubic = cube_predict) %>%
+      summarize(across(c(-x,-y), ~mean((y -.)^2)))
+    
+    out[[i]] = score
+    
+  }
+results = bind_rows(out, .id = "iter")
+return(results)
+}
+
+```
+:::
+
+## i. Performance when $\sigma=2$
+
+Use your function to repeat the simulation in part *f*, but use
+$\sigma=2$. Report tche number of times each model was best (you do not
+need to produce any plots).
+
+-   Be sure to generate new test data with ($n = 10000$, $\sigma = 2$,
+    using `seed = 612`).
+
+::: {.callout-note title="Solution"}
+```{r prob 1i}
+test_n = 10000
+set.seed(612)
+test_xvals = create_x(test_n)
+test_yvals = create_y(test_xvals, sd = 2)
+i_test = tibble(x = test_xvals, y = test_yvals)
+```
+
+```{r prob1i cont}
+part_i = part_h(n=100, sd=2, test_data = i_test, seed=613)
+```
+
+```{r prob1i_cont2}
+find_min <- part_i %>%
+  pivot_longer(-iter, names_to = "model", values_to = "MSE") %>% 
+  mutate(model = factor(model, levels = c("linear", "quad", "cubic"))) %>% 
+  group_by(iter) %>%
+    slice_min(MSE) %>%
+  ungroup() %>%
+  count(model) %>% mutate(p = n / sum(n))
+
+find_min
+```
+:::
+
+## j. Performance when $\sigma=4$ and $n=300$
+
+Repeat *i*, but now use $\sd=4$ and $n=300$.
+
+-   Be sure to generate new test data with ($n = 10000$, $\sigma = 4$,
+    using `seed = 612`).
+
+::: {.callout-note title="Solution"}
+```{r prob 1j}
+test_n2 = 10000
+set.seed(612)
+test_xvals = create_x(test_n2)
+test_yvals = create_y(test_xvals, sd = 4)
+j_test = tibble(x = test_xvals, y = test_yvals)
+
+part_j = part_h(n=300, sd=4, test_data = j_test, seed=613)
+
+
+```
+
+```{r  prob1j_cont}
+min_j = part_j %>%
+  pivot_longer(-iter, names_to = "model", values_to = "MSE") %>%
+  mutate(model = factor(model, levels=c("linear", "quad", "cubic"))) %>%
+  group_by(iter) %>%
+    slice_min(MSE) %>%
+  ungroup() %>%
+  count(model) %>% mutate(p = n/sum(n))
+
+min_j
+```
+:::
+
+## k. Understanding
+
+Describe the effects $\sigma$ and $n$ has on selection of the best
+model? Why is the *true* model form (i.e., quadratic) not always the
+*best* model to use when prediction is the goal?
+
+::: {.callout-note title="Solution"}
+An increased value of sigma (noise) makes it more difficult to build models that identify true relationships from all the noise. So, when sigma is large, even the true model form (quadratic) may overfit to the noise in training, causing the same error in the test data.
+Similarly, if sample size (n) is small, it makes models prone to overfitting with complex models. Therefore, when working with datasets without a sufficient sample size, it would likely be better to fit a simpler model than the "true" model.
+:::

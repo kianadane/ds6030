@@ -1,0 +1,287 @@
+---
+title: "Homework #3: Penalized Regression" 
+author: "Kiana Dane"
+format: ds6030hw-html
+---
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages, message=FALSE, warning=FALSE}
+data_dir = 'https://mdporter.github.io/teaching/data/' # data directory
+library(mlbench)
+library(glmnet)
+library(caret)
+library(tidymodels)# for optional tidymodels solutions
+library(tidyverse) # functions for data manipulation  
+```
+
+# Problem 1: Optimal Tuning Parameters
+
+In cross-validation, we discussed choosing the tuning parameter values that minimized the cross-validation error. Another approach, called the "one-standard error" rule [ISL pg 214, ESL pg 61], uses the values corresponding to the least complex model whose cv error is within one standard error of the best model. The goal of this assignment is to compare these two rules.
+
+Use simulated data from `mlbench.friedman1(n, sd=2)` in the `mlbench` R package to fit *lasso models*. The tuning parameter $\lambda$ (corresponding to the penalty on the coefficient magnitude) is the one we will focus one. Generate training data, use k-fold cross-validation to get $\lambda_{\rm min}$ and $\lambda_{\rm 1SE}$, generate test data, make predictions for the test data, and compare performance of the two rules under a squared error loss using a hypothesis test.
+
+
+Choose reasonable values for:
+
+- Number of cv folds ($K$)
+    - Note: you are free to use repeated CV, repeated hold-outs, or bootstrapping instead of plain cross-validation; just be sure to describe what do did so it will be easier to follow.
+- Number of training and test observations
+- Number of simulations
+- If everyone uses different values, we will be able to see how the results change over the different settings.
+- Don't forget to make your results reproducible (e.g., set seed)
+
+This pseudo code (using k-fold cv) will get you started:
+```{r template}
+library(mlbench)
+library(glmnet)
+
+#-- Settings
+n_train = 200        # number of training obs
+n_test =  100       # number of test obs
+K = 10              # number of CV folds
+alpha = 1         # glmnet tuning alpha (1 = lasso, 0 = ridge)
+M =              # number of simulations
+
+#-- Data Generating Function
+getData <- function(n) mlbench.friedman1(n) # data generating function
+
+#-- Simulations
+set.seed(123)
+        
+train_data <- getData(n=n_train)
+train_x <- tibble(train_data$x)
+train_y <- train_data$y
+
+test_data <- getData(n=n_test)
+test_x <- tibble(test_data$x)
+test_y <- test_data$y
+
+training_x <- as.matrix(train_x)
+training_y <- train_y
+
+lasso <- cv.glmnet(
+  x = training_x, y = training_y,
+  alpha = 1,
+  nfolds = 10)
+
+lambda_min <- lasso$lambda.min
+lambda_1se <- lasso$lambda.1se
+
+cat("lowest lambda (min):", lambda_min, "\n")
+cat("best lambda (1SE):", lambda_1se, "\n")
+
+```
+
+## a. Code for the simulation and performance results
+
+::: {.callout-note title="Solution"}
+
+```{r prob1 predict}
+testing_x <- as.matrix(test_x)
+
+lambda_min <- as.numeric(lambda_min)
+lambda_1se <- as.numeric(lambda_1se)
+
+pred_min <- predict(lasso, s = lambda_min, newx = testing_x)
+pred_1se <- predict(lasso, s = lambda_1se, newx = testing_x)
+```
+
+```{r prob1 error loss}
+losses_min <- mean((test_y - pred_min)^2)
+
+losses_1se <- mean((test_y - pred_1se)^2)
+
+cat("loss for lambda.min:", losses_min, "\n")
+cat("loss for lambda.1se:", losses_1se, "\n")
+
+```
+
+:::
+
+## b. Hypothesis test
+
+Provide results and discussion of a hypothesis test comparing $\lambda_{\rm min}$ and $\lambda_{\rm 1SE}$.
+
+::: {.callout-note title="Solution"}
+
+```{r prob1b}
+comparison_min_1se <- t.test((test_y - pred_min)^2, (test_y - pred_1se)^2)
+
+comparison_min_1se
+```
+
+While the t-statistic is very small, suggesting little difference between the error of the two models, the p-value from this t test is evidence that the difference in means of the two groups is not statistically significant. Also, a 95% CI includes zero. Therefore, there is no significant difference in the error loss between lambda(min) and lambda(1se).
+
+:::
+
+# Problem 2 Prediction Contest: Real Estate Pricing
+
+This problem uses the [realestate-train](`r file.path(data_dir, 'realestate-train.csv')`) and [realestate-test](`r file.path(data_dir, 'realestate-test.csv')`) (click on links for data).
+
+The goal of this contest is to predict sale price (in thousands) (`price` column) using an *elastic net* model. Evaluation of the test data will be based on the root mean squared error ${\rm RMSE}= \sqrt{\frac{1}{m}\sum_i (y_i - \hat{y}_i)^2}$ for the $m$ test set observations.
+
+
+## a. Load and pre-process data
+
+Load the data and create necessary data structures for running *elastic net*.
+
+- You are free to use any data transformation or feature engineering
+- Note: there are some categorical predictors so at the least you will have to convert those to something numeric (e.g., one-hot or dummy coding).
+
+::: {.callout-note title="Solution"}
+
+```{r prob2a}
+train_data <- read.csv("realestate-train.csv")
+test_data <- read.csv("realestate-test.csv")
+
+X = glmnet::makeX(select(train_data, -price), test_data)
+X.train = X$x
+X.test = X$xtest
+Y.train = train_data$price
+
+```
+
+
+:::
+
+## b. Fit elastic net model
+
+Use an *elastic net* model to predict the `price` of the test data.
+
+- You are free to use any data transformation or feature engineering
+- You are free to use any tuning parameters
+- Report the $\alpha$ and $\lambda$ parameters you used to make your final predictions.
+- Describe how you choose those tuning parameters
+
+::: {.callout-note title="Solution"}
+
+```{r prob2b}
+set.seed(9903)
+K=10
+folds = rep(1:K, length=nrow(X.train)) %>% sample()
+
+mse_estimate <- function(alpha, folds) {
+  mse = cv.glmnet(X.train, Y.train, foldid=folds, alpha=alpha)$cvm %>% min()
+  sqrt(mse)
+}
+
+alpha.seq = seq(0,1, by=0.05)
+
+set.seed(1)
+RMSE = purrr::map_dbl(alpha.seq, \(a) mse_estimate(a, folds=folds))
+
+qplot(alpha.seq, RMSE)
+```
+
+```{r repeated cv}
+set.seed(2)
+RMSE2 = tibble()
+for (i in 1:50) {
+  folds_new = sample(folds)
+  rmse = tibble(
+    iter = i,
+    alpha = alpha.seq,
+    RMSE = purrr::map_dbl(alpha.seq, \(a) mse_estimate(a, folds=folds_new))
+  )
+  RMSE2 = bind_rows(RMSE2, rmse)
+}
+
+RMSE2 %>%
+  ggplot(aes(alpha, RMSE, group=iter)) + geom_line()
+```
+
+:::
+
+## c. Submit predictions
+
+Submit a .csv file (ensure comma separated format) named `lastname_firstname.csv` that includes your predictions in a column named *yhat*. We will use automated evaluation, so the format must be exact.
+
+- You will receive credit for a proper submission; the top five scores will receive 2 bonus points.
+
+::: {.callout-note title="Solution"}
+
+```{r prob2c}
+RMSE2 %>%
+  ggplot(aes(alpha, RMSE, group = alpha)) + geom_boxplot()
+```
+
+```{r prob2c meanplot}
+RMSE.mu = RMSE2 %>%
+  group_by(alpha) %>% summarize (RMSE=mean(RMSE), RMSE.median = median(RMSE))
+
+RMSE.mu %>%
+  group_by(alpha) %>% summarize (RMSE=mean(RMSE)) %>%
+  ggplot(aes(alpha, RMSE)) + geom_point() + geom_line()
+
+```
+
+```{r prob2c meantable}
+RMSE.mu %>% arrange(RMSE)
+```
+
+```{r prob2c bestalpha}
+(alpha.hat = RMSE.mu %>% slice_min(RMSE) %>% pull(alpha))
+```
+
+
+```{r choose lambda}
+set.seed(3)
+K=10
+cv.fit = cv.glmnet(X.train, Y.train, nfolds=K, alpha=alpha.hat)
+plot(cv.fit, las=1)
+
+```
+
+```{r use lambda min}
+(lambda.hat = cv.fit$lambda.min)
+
+lambda.hat
+```
+
+
+:::
+
+## d. Report anticpated performance
+
+Report the anticipated performance of your method in terms of RMSE. We will see how close your performance assessment matches the actual value. 
+
+::: {.callout-note title="Solution"}
+
+```{r prob2d}
+ind = which.min(cv.fit$cvm)
+sqrt(cv.fit$cvm[ind])
+```
+
+```{r prob2d cont}
+performance = RMSE2 %>% filter(alpha == alpha.hat)
+
+performance %>%
+  ggplot(aes(RMSE)) + geom_histogram(bins=20) + 
+  geom_vline(xintercept = sqrt(cv.fit$cvm[ind]), color = "hotpink")
+```
+
+```{r prob 2d cont2}
+(mean(performance$RMSE))
+```
+
+```{r prob2d cont3}
+(qt(0.975, df=nrow(performance)-1)*sd(performance$RMSE)/sqrt(n_distinct(RMSE2$iter)))
+```
+
+```{r prob2d predict}
+fit = glmnet(X.train, Y.train, alpha=alpha.hat)
+
+yhat = predict(fit, newx = X.test, s=lambda.hat)[,1]
+
+tibble(yhat) %>% write_csv("dane_kiana.csv")
+```
+
+```{r test}
+#data.test = read_csv("realestate-test.csv")
+#yardstick::rmse_vec(truth=data.test$price, yhat)
+```
+
+
+
+:::

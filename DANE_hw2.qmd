@@ -1,0 +1,400 @@
+---
+title: "Homework #2: Resampling" 
+author: "Kiana Dane"
+format: ds6030hw-html
+---
+
+```{r config, include=FALSE}
+# Set global configurations and settings here
+knitr::opts_chunk$set()                 # set global chunk options
+ggplot2::theme_set(ggplot2::theme_bw()) # set ggplot2 theme
+```
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages, message=FALSE, warning=FALSE}
+data_dir = 'https://mdporter.github.io/teaching/data/' # data directory
+library(tidymodels)# for optional tidymodels solutions
+library(tidyverse) # functions for data manipulation  
+library(ggplot2)
+```
+
+# Problem 1: Bootstrapping
+
+Bootstrap resampling can be used to quantify the uncertainty in a fitted curve.
+
+## a. Data Generating Process
+
+Create a set of functions to generate data from the following distributions: \begin{align*}
+X &\sim \mathcal{U}(0, 2) \qquad \text{Uniform between $0$ and $2$}\\
+Y &= 1 + 2x + 5\sin(5x) + \epsilon \\
+\epsilon &\sim \mathcal{N}(0,\, \sigma=2.5)
+\end{align*}
+
+::: {.callout-note title="Solution"}
+```{r prob1a}
+create_x <- function(n) runif(n, min = 0, max = 2)
+
+func_true <- function(x) 1 + 2 * x + 5 * sin(5 * x)
+
+create_y <- function(x) {
+  n = length(x)
+  func_true(x) + rnorm(n, sd=2.5)
+}
+
+```
+:::
+
+## b. Simulate data
+
+Simulate $n=100$ realizations from these distributions. Produce a scatterplot and draw the true regression line $f(x) = E[Y \mid X=x]$. Use `set.seed(211)` prior to generating the data.
+
+::: {.callout-note title="Solution"}
+```{r prob1b}
+set.seed(211)
+
+n <- 100
+x = create_x(n)
+y = create_y(x)
+prob1b_data <- data.frame(x,y)
+
+ggplot(prob1b_data, aes(x = x, y = y)) +
+  geom_point(color = "navy") +  
+  stat_function(fun = func_true, color = "gold", size = 1.2) +
+  labs(title = "Scatterplot with True Regression Line",
+       x = "X",
+       y = "Y") +
+  theme_minimal()
+
+```
+:::
+
+## c. 5th degree polynomial fit
+
+Fit a 5th degree polynomial. Produce a scatterplot and draw the *estimated* regression curve.
+
+::: {.callout-note title="Solution"}
+```{r prob1c}
+poly_model <- lm(y ~ poly(x, 5), data = prob1b_data)
+
+prob1b_data$predicted_Y <- predict(poly_model, newdata = prob1b_data)
+
+ggplot(prob1b_data, aes(x = x, y = y)) +
+  geom_point(color = "blue", alpha = 0.6) +  
+  geom_line(aes(y = predicted_Y), color = "hotpink", size = 1.2) +  
+  labs(title = "5th Degree Polynomial",
+       x = "X",
+       y = "Y") +
+  theme_minimal()
+```
+:::
+
+## d. Bootstrap sampling
+
+Make 200 bootstrap samples. For each bootstrap sample, fit a 5th degree polynomial and make predictions at `eval_pts = seq(0, 2, length=100)`
+
+-   Set the seed (use `set.seed(212)`) so your results are reproducible.
+-   Produce a scatterplot with the original data and add the 200 bootstrap curves
+
+::: {.callout-note title="Solution"}
+```{r prob1d}
+library(boot)
+library(ggplot2)
+
+set.seed(212)
+
+# Number of bootstrap samples
+m <- 200
+
+eval_pts <- seq(0, 2, length = 100)
+
+bootstrap_preds <- matrix(0, nrow = 100, ncol = m)
+
+n <- nrow(prob1b_data)  
+
+# 200 bootstrap samples
+for (i in 1:m) {
+
+  bootstrap_sample <- prob1b_data[sample(1:n, size = n, replace = TRUE), ]
+  
+  poly_model_boot <- lm(y ~ poly(x, 5), data = bootstrap_sample)
+
+  bootstrap_preds[, i] <- predict(poly_model_boot, newdata = data.frame(x = eval_pts))
+}
+
+bootstrap_df <- data.frame(eval_pts = eval_pts, bootstrap_preds)
+
+
+bootstrap_long <- bootstrap_df %>%
+  pivot_longer(cols = -eval_pts, names_to = "bootstrap_sample", values_to = "y_pred")
+
+plot_data <- ggplot(prob1b_data, aes(x = x, y = y)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  labs(title = "Scatterplot with 200 Bootstrap Curves",
+       x = "X",
+       y = "Y") +
+  theme_minimal()
+
+plot_data <- plot_data +
+  geom_line(data = bootstrap_long, aes(x = eval_pts, y = y_pred, group = bootstrap_sample), 
+            color = "orange", alpha = 0.2, size = 0.5)
+
+print(plot_data)
+```
+:::
+
+## e. Confidence Intervals
+
+Calculate the pointwise 95% confidence intervals from the bootstrap samples. That is, for each $x \in {\rm eval\_pts}$, calculate the upper and lower limits such that only 5% of the curves fall outside the interval at $x$.
+
+-   Remake the plot from part *c*, but add the upper and lower boundaries from the 95% confidence intervals.
+
+::: {.callout-note title="Solution"}
+```{r prob1e}
+set.seed(212)
+
+eval_pts <- seq(0, 2, length = 100)
+
+bootstrap_preds <- matrix(0, nrow = 100, ncol = 200)
+
+n <- nrow(prob1b_data)  
+for (i in 1:200) {
+  bootstrap_sample <- prob1b_data[sample(1:n, size = n, replace = TRUE), ]
+
+  poly_model_boot <- lm(y ~ poly(x, 5), data = bootstrap_sample)
+
+  bootstrap_preds[, i] <- predict(poly_model_boot, newdata = data.frame(x = eval_pts))
+}
+
+lower_bound <- apply(bootstrap_preds, 1, quantile, probs = 0.025)
+upper_bound <- apply(bootstrap_preds, 1, quantile, probs = 0.975)
+
+plot_data <- ggplot(prob1b_data, aes(x = x, y = y)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  labs(title = "200 Bootstrap Curves w/ 95% Confidence Intervals",
+       x = "X",
+       y = "Y") +
+  theme_minimal()
+
+for (i in 1:200) {
+  plot_data <- plot_data +
+    geom_line(aes(x = eval_pts, y = bootstrap_preds[, i]), color = "lightblue", alpha = 0.2, size = 2)
+}
+
+plot_data <- plot_data +
+  geom_line(aes(x = eval_pts, y = lower_bound), color = "orange") +
+  geom_line(aes(x = eval_pts, y = upper_bound), color = "orange")
+
+print(plot_data)
+```
+:::
+
+# Problem 2: V-Fold cross-validation with $k$ nearest neighbors
+
+Run 10-fold cross-validation on the data generated in part 1b to select the optimal $k$ in a k-nearest neighbor (kNN) model. Then evaluate how well cross-validation performed by evaluating the performance on a large test set. The steps below will guide you.
+
+## a. Implement 10-fold cross-validation
+
+Use $10$-fold cross-validation to find the value of $k$ (i.e., neighborhood size) that provides the smallest cross-validated MSE using a kNN model.
+
+-   Search over $k=3,4,\ldots, 40$.
+-   Use `set.seed(221)` prior to generating the folds to ensure the results are replicable.
+-   Show the following:
+    -   the optimal $k$ (as determined by cross-validation)
+    -   the corresponding estimated MSE
+    -   produce a plot with $k$ on the x-axis and the estimated MSE on the y-axis (optional: add 1-standard error bars).
+
+::: {.callout-note title="Solution"}
+
+```{r prob2a}
+library(class)
+library(caret)  
+library(FNN)
+library(ggplot2)
+
+set.seed(211)
+
+n <- 100
+x = create_x(n)
+y = create_y(x)
+prob2a_data <- tibble(x,y)
+```
+
+```{r prob2a_cont}
+K = 3:40
+
+knn_func <- function(fit, evaluate, K) {
+  MSE = numeric(length(K))
+  for(i in 1:length(K)) {
+    k = K[i]
+    knn = FNN::knn.reg(train = fit %>% select(x), 
+                       y = fit$y,
+                       test = evaluate %>% select(x),
+                       k = k)
+    r.val = evaluate$y - knn$pred
+    MSE[i] = mean(r.val^2)
+  }
+tibble(k = K, mse = MSE, n_eval = nrow(evaluate))
+}
+
+```
+
+```{r prob2a_cont2}
+set.seed(221)
+n.folds = 10
+fold = sample(rep(1:n.folds, length = nrow(prob2a_data)))
+
+out = vector("list", n.folds)
+for(h in 1:n.folds){
+  
+  val = which(fold == h)
+  train = which(fold != h)
+
+  out[[h]] = knn_func(
+    fit = prob2a_data[train,], 
+    evaluate = prob2a_data[val,], K = 3:40) %>% 
+    mutate(fold = h)
+}
+out = bind_rows(out)
+
+out
+```
+
+```{r prob2a_cont3}
+performance = 
+  out %>% 
+  group_by(k) %>% 
+    summarize(
+      n_folds = n(),
+      MSE = mean(mse), 
+      MSE2 = sum(n_eval*mse) / sum(n_eval), 
+      SE = sd(mse)/sqrt(n)
+    ) %>% 
+  arrange(MSE)
+
+performance
+```
+
+```{r prob2a_cont4}
+performance %>% slice_min(MSE)
+performance
+```
+
+```{r prob2a_cont5}
+performance %>% 
+  mutate(highlight = ifelse(MSE == min(MSE), TRUE, FALSE)) %>% 
+  ggplot(aes(k, color=highlight)) + 
+  geom_point(aes(y=MSE)) + 
+  geom_errorbar(aes(ymin=MSE - SE, ymax=MSE+SE)) + 
+  scale_color_manual(values=c("lightpink", "purple"))
+```
+
+:::
+## b. Find the optimal *edf*
+
+The $k$ (number of neighbors) in a kNN model determines the effective degrees of freedom *edf*. What is the optimal *edf*? Be sure to use the correct sample size when making this calculation. Produce a plot similar to that from part *a*, but use *edf* (effective degrees of freedom) on the x-axis.
+
+::: {.callout-note title="Solution"}
+
+```{r prob2b}
+
+performance = performance %>% mutate(edf = (nrow(prob2a_data)*9/10)/k)
+performance %>% slice_min(MSE)
+
+
+```
+```{r prob2b_cont}
+performance %>%
+  mutate(best = ifelse(MSE == min(MSE), TRUE, FALSE)) %>%
+  ggplot(aes(edf, color=best))+
+  geom_point(aes(y=MSE)) +
+  geom_errorbar(aes(ymin=MSE - SE, ymax=MSE + SE)) +
+  scale_color_manual(values=c("blue", "orange"))
+```
+
+
+:::
+
+## c. Choose $k$
+
+After running cross-validation, a final model fit from *all* of the training data needs to be produced to make predictions. What value of $k$ would you choose? Why?
+
+::: {.callout-note title="Solution"}
+
+I would choose k=11 - this is because though it is evident that k=8 produces the lowest MSE, k=9 and k=11 have similar MSEs and allow for slightly more conservative choice with reduced variance.
+
+:::
+
+## d. Evaluate actual performance
+
+Now we will see how well cross-validation performed. Simulate a test data set of $50000$ observations from the same distributions. Use `set.seed(223)` prior to generating the test data.
+
+-   Fit a set of kNN models, using the full training data, and calculate the mean squared error (MSE) on the test data for each model. Use the same $k$ values in *a*.
+-   Report the optimal $k$, the corresponding *edf*, and MSE based on the test set.
+
+::: {.callout-note title="Solution"}
+
+```{r prob2d}
+
+test_n = 50000
+set.seed(223)
+test_xvals = create_x(test_n)
+test_yvals = create_y(test_xvals)
+
+test_2d = tibble(x = test_xvals, y = test_yvals)
+
+results_test = knn_func(prob1b_data, test_2d, K = 3:40) %>%
+  mutate(edf = nrow(prob1b_data)/k)
+
+results_test %>% slice_min(mse)
+
+
+```
+
+:::
+
+## e. Performance plots
+
+Plot both the cross-validation estimated and (true) error calculated from the test data on the same plot. See Figure 5.6 in ISL (pg 182) as a guide.
+
+-   Produce two plots: one with $k$ on the x-axis and one with *edf* on the x-axis.
+-   Each plot should have two lines: one from part *a* and one from part *d*
+
+::: {.callout-note title="Solution"}
+
+```{r prob2e}
+
+bind_rows(
+  cv = performance, 
+  test = results_test %>% rename(MSE = mse), 
+  .id="error"
+  ) %>% 
+  ggplot(aes(edf, MSE, color=error)) + 
+  geom_point() + geom_line() +
+  labs(title="MSE by EDF")
+
+bind_rows(
+  cv = performance, 
+  test = results_test %>% rename(MSE = mse), 
+  .id="error"
+  ) %>% 
+  ggplot(aes(k, MSE, color=error)) + 
+  geom_point() + geom_line() + 
+  labs(title="MSE by k")
+
+
+```
+
+:::
+
+## f. Did cross-validation work as intended?
+
+Based on the plots from *e*, does it appear that cross-validation worked as intended? How sensitive is the choice of $k$ on the resulting test MSE?
+
+::: {.callout-note title="Solution"}
+
+Based on these two plots, it appears that cross-validation did work as intended by selecting values for k that produce results with low MSEs. The best solution was not recommended.
+
+It appears that the choice of k in between the values of about 5 and 15 are the most sensitive, where k values outside of this range are relatively evenly distributed.
+
+:::
