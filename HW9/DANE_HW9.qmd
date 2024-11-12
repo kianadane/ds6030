@@ -1,0 +1,442 @@
+---
+title: "Homework #9: Feature Importance" 
+author: "Kiana Dane"
+output: html document
+---
+
+```{r config, include=FALSE}
+# Set global configurations and settings here
+knitr::opts_chunk$set()                 # set global chunk options
+ggplot2::theme_set(ggplot2::theme_bw()) # set ggplot2 theme
+```
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages, message=FALSE, warning=FALSE}
+dir_data = 'https://mdporter.github.io/teaching/data/' # data directory
+library(tidyverse) # functions for data manipulation 
+library(randomForest)
+library(ggplot2)
+library(xgboost)
+```
+
+
+# Problem 1: Permutation Feature Importance 
+
+Vanderbilt Biostats has collected data on Titanic survivors (https://hbiostat.org/data/). I have done some simple processing and split into a training and test sets.
+
+- [titanic_train.csv](`r file.path(dir_data, "titanic_train.csv")`)
+- [titanic_test.csv](`r file.path(dir_data, "titanic_test.csv")`)
+
+We are going to use this data to investigate feature importance.
+Use `Class`, `Sex`, `Age`, `Fare`, `sibsp` (number of siblings or spouse on board), `parch` (number of parents or children on board), and `Joined` (city where passenger boarded) for the predictor variables (features) and `Survived` as the outcome variable. 
+
+## a. Load the titanic traning and testing data
+
+::: {.callout-note title="Solution"}
+```{r prob 1a}
+train_data <- read.csv("titanic_train.csv")
+test_data <- read.csv("titanic_test.csv")
+
+train_data <- na.omit(train_data)
+test_data <- na.omit(test_data)
+
+
+```
+
+:::
+
+## b. Method 1: Built-in importance scores
+
+Fit a tree ensemble model (e.g., Random Forest, boosted tree) on the training data. You are free to use any method to select the tuning parameters.
+
+Report the built-in feature importance scores and produce a barplot with feature on the x-axis and importance on the y-axis.
+
+```{r prob 1b randomforest}
+train_data$Survived <- as.factor(train_data$Survived)
+
+rf_model <- randomForest(Survived ~ Class + Sex + Age + Fare + sibsp + parch + Joined, 
+                         data = train_data, 
+                         importance = TRUE)
+
+# get feature importance scores
+importance_scores <- as.data.frame(importance(rf_model))
+importance_scores$Feature <- rownames(importance_scores)
+
+# Plot
+ggplot(importance_scores, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Feature importance - random forest", x = "Feature", y = "Importance (Mean Decrease Gini)")
+```
+
+
+:::
+
+## c. Performance 
+
+Report the performance of the model fit from (a.) on the test data. Use the log-loss (where $M$ is the size of the test data):
+$$ 
+\text{log-loss}(\hat{p}) = - \frac{1}{M} \sum_{i=1}^m [y_i \log \, \hat{p}_i + (1 - y_i) \log \, (1 - \hat{p}_i)]
+$$
+
+::: {.callout-note title="Solution"}
+```{r prob 1c}
+# Predict probabilities for "survived"
+pred_probs <- predict(rf_model, test_data, type = "prob")[, 2]  
+# labels from the test data
+actual <- as.numeric(as.character(test_data$Survived))
+
+# Calculate log-loss
+M <- length(actual)
+log_loss <- - (1 / M) * sum(actual * log(pred_probs) + (1 - actual) * log(1 - pred_probs))
+
+cat("Log-Loss of Random Forest Model on Test Data:", log_loss, "\n")
+```
+
+:::
+
+
+## d. Method 2: Permute *after* fitting
+
+Use the fitted model from question (a.) to perform permutation feature importance. Shuffle/permute each variable individually on the *test set* before making predictions. Record the loss. Repeat $M=10$ times and produce a boxplot of the change in loss (change from reported loss from part b.). 
+
+::: {.callout-note title="Solution"}
+```{r prob 1d}
+# define as function
+log_loss <- function(actual, predict_probs) {
+  epsilon <- 1e-15  # Small constant to avoid log(0)
+  predicted_probs <- pmax(pmin(predict_probs, 1 - epsilon), epsilon)
+  M <- length(actual)
+  - (1 / M) * sum(actual * log(predict_probs) + (1 - actual) * log(1 - predict_probs))
+}
+
+baseline_log_loss <- log_loss(actual, pred_probs)
+
+# initialize list for log-loss change
+feature_importance <- list()
+
+M <- 10
+
+# loop over each feature to shuffle
+for (feature in colnames(test_data)[colnames(test_data) != "Survived"]) {
+  # store log-loss change
+  log_loss_changes <- numeric(M)
+  for (i in 1:M) {
+    # copy test data
+    permuted_test_data <- test_data
+    
+    # shuffle the selected feature
+    permuted_test_data[[feature]] <- sample(permuted_test_data[[feature]])
+    
+    # predict probabilities with shuffled data
+    permuted_pred_probs <- predict(rf_model, permuted_test_data, type = "prob")[, 2]
+    
+    # calculate log-loss with the shuffled feature
+    permuted_log_loss <- log_loss(actual, permuted_pred_probs)
+    
+    # record the log-loss change 
+    log_loss_changes[i] <- permuted_log_loss - baseline_log_loss
+  }
+  #feature importance
+  feature_importance[[feature]] <- log_loss_changes
+}
+
+# convert list to df
+feature_importance_df <- do.call(rbind, lapply(names(feature_importance), function(feature) {
+  data.frame(Feature = feature, LogLossChange = feature_importance[[feature]])
+}))
+
+# boxplot of log-loss change for each feature
+library(ggplot2)
+ggplot(feature_importance_df, aes(x = Feature, y = LogLossChange)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Permutation Feature Importance", x = "Feature", y = "Log-Loss change")
+```
+
+:::
+
+## e. Method 3: Permute *before* fitting
+
+For this approach, shuffle/permute the *training data* and re-fit the ensemble model. Evaluate the predictions on the (unaltered) test data. Repeat $M=10$ times (for each predictor variable) and produce a boxplot of the change in loss. 
+
+::: {.callout-note title="Solution"}
+```{r prob 1e}
+feature_importance_train <- list()
+
+M <- 10
+
+# Loop over each feature to shuffle and refit the model, calculating log-loss change
+for (feature in colnames(train_data)[colnames(train_data) != "Survived"]) {
+  
+  log_loss_changes <- numeric(M)
+  
+  for (i in 1:M) {
+    # copy train data
+    permuted_train_data <- train_data
+    # shuffle the feature
+    permuted_train_data[[feature]] <- sample(permuted_train_data[[feature]])
+    # refit the random forest model on the permuted training data
+    permuted_rf_model <- randomForest(Survived ~ Class + Sex + Age + Fare + sibsp + parch + Joined, data = permuted_train_data)
+    # predict probabilities on test data
+    permuted_pred_probs <- predict(permuted_rf_model, test_data, type = "prob")[, 2]
+    # find new log-loss 
+    permuted_log_loss <- log_loss(actual, permuted_pred_probs)
+    # record change in log-loss
+    log_loss_changes[i] <- permuted_log_loss - baseline_log_loss
+  }
+  feature_importance_train[[feature]] <- log_loss_changes
+}
+
+feature_importance_train_df <- do.call(rbind, lapply(names(feature_importance_train), function(feature) {
+  data.frame(Feature = feature, LogLossChange = feature_importance_train[[feature]])
+}))
+# remove any non-finite LogLossChange values
+feature_importance_train_df <- feature_importance_train_df[is.finite(feature_importance_train_df$LogLossChange), ]
+
+ggplot(feature_importance_train_df, aes(x = Feature, y = LogLossChange)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Permutation Feature Importance - Training Data Shuffle", 
+       x = "Feature", 
+       y = "Change in Log-Loss")
+```
+
+:::
+
+
+## f. Understanding 
+
+Describe the benefits of each of the three approaches to measure feature importance. 
+
+::: {.callout-note title="Solution"}
+
+### 1. Built-in Feature Importance
+	•	Efficiency: This method is typically faster than permutation methods, as it uses the feature importance metrics that are calculated during model training.
+	•	Direct Interpretation: Built-in feature importance scores directly reflect the importance of each feature based on its contributions to splitting nodes or reducing impurity (e.g., Gini impurity or variance).
+	•	No Repetition Required: Since the model computes importance as part of the training process, it doesn’t require shuffling or multiple passes, making it computationally cheaper for large datasets or complex models.
+
+### 2. Permutation Feature Importance with Test data shuffle
+	•	This method gives a measure of feature importance based on the model’s performance on unseen data. It shows how much each feature contributes to the final predictions, which can provide a more realistic estimate of any given feature's predictive power.
+	•	This approach can be applied to many different models, not just tree-based models, which makes it a good choice for comparing feature importance between model types.
+	•	By enabling us to see how much the log-loss changes when features are shuffled, this method can reveal relationships to the target variable that may otherwise be difficult to observe
+
+### 3. Permutation Feature Importance with Training data shuffle
+	•	By shuffling features in the training data and then testing on the unaltered test data, this approach assesses the effect of each feature on the model’s ability to generalize, which is valuable when identifying key features that contribute to overfitting.
+	•	This approach reveals not only the importance of each feature (like the above method) but also how the model’s reliance on it during training affects its overall predictive capability, allowing the creation of more complex models
+
+:::
+
+# Problem 2: Effects of correlated predictors
+
+This problem will illustrate what happens to the importance scores when there are highly associated predictors. 
+
+## a. Create an almost duplicate feature
+
+Create a new feature `Sex2` that is 95% the same as `Sex`. Do this by selecting 5% of training ($n=50$) and testing ($n=15$) data and flip the `Sex` value. 
+
+::: {.callout-note title="Solution"}
+```{r prob 2a}
+set.seed(123) 
+
+train_data$Sex2 <- train_data$Sex
+test_data$Sex2 <- test_data$Sex
+
+# Flip 5% of Sex values in training data
+train_indices <- sample(1:nrow(train_data), size = 0.05 * nrow(train_data))
+train_data$Sex2[train_indices] <- ifelse(train_data$Sex[train_indices] == "Male", "Female", "Male")
+
+# Flip in testing data
+test_indices <- sample(1:nrow(test_data), size = 0.05 * nrow(test_data))
+test_data$Sex2[test_indices] <- ifelse(test_data$Sex[test_indices] == "Male", "Female", "Male")
+
+table(train_data$Sex, train_data$Sex2)
+table(test_data$Sex, test_data$Sex2)
+```
+
+:::
+
+## b. Method 1: Built-in importance
+
+Fit the same model as in Problem 1b, but use the new data that includes `Sex2` (i.e., use both `Sex` and `Sex2` in the model). Calculate the built-in feature importance score and produce a barplot. 
+
+::: {.callout-note title="Solution"}
+```{r prob 2b}
+
+rf_model_sex2 <- randomForest(Survived ~ Class + Sex + Sex2 + Age + Fare + sibsp + parch + Joined, 
+                                   data = train_data, 
+                                   importance = TRUE)
+
+# Extract feature importance scores
+importance_scores <- as.data.frame(importance(rf_model_sex2))
+importance_scores$Feature <- rownames(importance_scores)
+
+# Plot feature importance
+ggplot(importance_scores, aes(x = reorder(Feature, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Feature Importance with Sex and Sex2 - Random Forest", 
+       x = "Feature", 
+       y = "Importance (Mean Decrease Gini)")
+```
+
+:::
+
+## c. Method 2: Permute *after* fitting
+
+Redo Method 2 (problem 1d) on the new data/model and produce a boxplot of importance scores. The importance score is defined as the difference in loss.
+
+::: {.callout-note title="Solution"}
+```{r prob 2c}
+log_loss <- function(actual, predict_probs) {
+  epsilon <- 1e-15
+  predicted_probs <- pmax(pmin(predict_probs, 1 - epsilon), epsilon)
+  M <- length(actual)
+  - (1 / M) * sum(actual * log(predict_probs) + (1 - actual) * log(1 - predict_probs))
+}
+
+actual <- as.numeric(as.character(test_data$Survived))
+pred_probs <- predict(rf_model_sex2, test_data, type = "prob")[, 2]
+baseline_log_loss <- log_loss(actual, pred_probs)
+
+# initialize list for log-loss change
+feature_importance <- list()
+M <- 10
+
+# loop over each feature to shuffle and calculate log-loss change
+for (feature in colnames(test_data)[colnames(test_data) != "Survived"]) {
+  log_loss_changes <- numeric(M)
+  
+  for (i in 1:M) {
+    permuted_test_data <- test_data
+    permuted_test_data[[feature]] <- sample(permuted_test_data[[feature]])
+    
+    permuted_pred_probs <- predict(rf_model_sex2, permuted_test_data, type = "prob")[, 2]
+    
+    # calculate log-loss with the shuffled feature
+    permuted_log_loss <- log_loss(actual, permuted_pred_probs)
+    
+    # Record change in log-loss
+    log_loss_changes[i] <- permuted_log_loss - baseline_log_loss
+  }
+  
+  feature_importance[[feature]] <- log_loss_changes
+}
+
+# convert list to df
+feature_importance_df <- do.call(rbind, lapply(names(feature_importance), function(feature) {
+  data.frame(Feature = feature, LogLossChange = feature_importance[[feature]])
+}))
+
+ggplot(feature_importance_df, aes(x = Feature, y = LogLossChange)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Permutation Feature Importance with Sex and Sex2", x = "Feature", y = "Log-Loss Change")
+```
+
+:::
+
+## d. Method 3: Permute *before* fitting
+
+Redo Method 3 (problem 1e) on the new data and produce a boxplot of importance scores. The importance score is defined as the difference in loss.
+
+::: {.callout-note title="Solution"}
+```{r prob 2d}
+log_loss <- function(actual, predict_probs) {
+  epsilon <- 1e-15
+  predicted_probs <- pmax(pmin(predict_probs, 1 - epsilon), epsilon)
+  M <- length(actual)
+  - (1 / M) * sum(actual * log(predict_probs) + (1 - actual) * log(1 - predict_probs))
+}
+
+# includes Sex2
+actual <- as.numeric(as.character(test_data$Survived))
+pred_probs <- predict(rf_model_sex2, test_data, type = "prob")[, 2]
+baseline_log_loss <- log_loss(actual, pred_probs)
+
+# initialize list for log-loss change
+feature_importance_train <- list()
+M <- 10
+
+# loop over each feature
+for (feature in colnames(train_data)[colnames(train_data) != "Survived"]) {
+  
+  log_loss_changes <- numeric(M)
+  
+  for (i in 1:M) {
+    permuted_train_data <- train_data
+ 
+    permuted_train_data[[feature]] <- sample(permuted_train_data[[feature]])
+    
+    # refit the random forest model on permuted training data
+    permuted_rf_model <- randomForest(Survived ~ Class + Sex + Sex2 + Age + Fare + sibsp + parch + Joined, 
+                                      data = permuted_train_data)
+    
+    # Predict probabilities on unaltered test data
+    permuted_pred_probs <- predict(permuted_rf_model, test_data, type = "prob")[, 2]
+    
+    # calculate log-loss with refitted model
+    permuted_log_loss <- log_loss(actual, permuted_pred_probs)
+    
+    # record log-loss change
+    log_loss_changes[i] <- permuted_log_loss - baseline_log_loss
+  }
+  feature_importance_train[[feature]] <- log_loss_changes
+}
+
+# convert list to a df
+feature_importance_train_df <- do.call(rbind, lapply(names(feature_importance_train), function(feature) {
+  data.frame(Feature = feature, LogLossChange = feature_importance_train[[feature]])
+}))
+feature_importance_train_df <- feature_importance_train_df[is.finite(feature_importance_train_df$LogLossChange), ]
+
+ggplot(feature_importance_train_df, aes(x = Feature, y = LogLossChange)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Permutation Feature Importance - Training Data Shuffle with Sex2", 
+       x = "Feature", 
+       y = "Change in Log-Loss")
+```
+
+:::
+
+## e. Understanding
+
+Describe how the addition of the almost duplicated predictor impacted the feature importance results.  
+
+::: {.callout-note title="Solution"}
+
+###  1. Reduced Importance for Original Predictor (Sex):
+	•	When two highly correlated predictors (like Sex and Sex2) are included, 
+	the model’s reliance on each individually may decrease. 
+	Since Sex2 contains nearly the same information as Sex, the importance of 
+	Sex may decrease because Sex2 can effectively substitute it in the model.
+	•	This often results in a “sharing” of importance between the two 
+	correlated features, diluting the original feature’s apparent impact.
+	
+###	2.	Increased Overall Importance Between Correlated Features:
+	•	The model might distribute importance across both Sex and Sex2, 
+	meaning both could show moderate importance scores, 
+	even if only one of them is truly necessary.
+	•	When these near-duplicate features are shuffled, the predictive 
+	performance drops because each feature individually provides similar 
+	information. This can result in both Sex and Sex2 showing high importance, 
+	albeit slightly lower than if only one were included.
+	
+###	3.	Masking of True Feature Importance:
+	•	Adding a duplicated predictor can cause the model to split importance 
+	across these redundant variables, potentially lowering the relative 
+	importance of other truly distinct predictors (e.g., Age or Fare).
+	•	This effect can obscure the relative importance of other features 
+	by “inflating” the importance attributed to similar predictors.
+	
+###	4.	Interpretation Challenges:
+	•	From an interpretive standpoint, the presence of Sex2 can lead to 
+	ambiguity about which predictor (Sex or Sex2) is driving predictions.
+	•	Highly correlated predictors often introduce redundancy, complicating 
+	the understanding of individual feature contributions and potentially 
+	indicating the need for dimensionality reduction or feature selection.
+
+:::
+

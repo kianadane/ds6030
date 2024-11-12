@@ -1,0 +1,161 @@
+---
+title: "Homework #7: Stacking and Boosting" 
+author: "Kiana Dane"
+format: ds6030hw-html
+---
+
+
+
+```{r config, include=FALSE}
+# Set global configurations and settings here
+knitr::opts_chunk$set()                 # set global chunk options
+ggplot2::theme_set(ggplot2::theme_bw()) # set ggplot2 theme
+```
+
+
+# Stacking for Kaggle
+
+You are to make at least one official entry in the [House Prices: Advanced Regression Techniques](https://www.kaggle.com/c/house-prices-advanced-regression-techniques/overview) Kaggle contest **using stacking or model averaging**; at least one component model must be a boosting model. 
+
+- You will need to register in Kaggle (its free)
+- Read the details of the contest. Understand the data and evaluation function.
+- Make at least one submission that uses **stacking or model averaging**. 
+- If you get a score on the public leaderboard of $\text{RMSE}<0.50$ (note RMSE is calculated on the log scale), you receive full credit, otherwise, you'll lose 10 points. 
+    - I'll allow [teaming](https://www.kaggle.com/c/house-prices-advanced-regression-techniques/team). Each team member can produce one component model and then use stacking or model averaging to combine predictions. 
+    - You don't need to team, but must still combine multiple models. At least one of the component models should be boosting. 
+- Each person submit the following in Canvas:
+    - Code (if teaming, your code and the shared stacking code)
+    - kaggle name (or team name) so we can ensure you had a valid submission. 
+    - your score and current ranking on the kaggle leaderboard
+- Top 5 scores get 2 bonus points
+    - Teams will split their bonus points among team members
+```{r}
+library(tidyverse)
+library(glmnet)
+library(xgboost)
+library(caret)
+
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+```
+
+```{r process}
+# Separate column types
+numeric_cols <- names(select_if(train, is.numeric))
+categorical_cols <- names(select_if(train, is.character))
+
+# Remove id and saleprice
+numeric_cols <- setdiff(numeric_cols, c("Id", "SalePrice"))
+
+for (col in numeric_cols) {
+  train[[col]][is.na(train[[col]])] <- median(train[[col]], na.rm = TRUE)
+  test[[col]][is.na(test[[col]])] <- median(test[[col]], na.rm = TRUE)
+}
+
+# Impute categorical columns using mode
+for (col in categorical_cols) {
+  mode_value <- names(sort(table(train[[col]]), decreasing = TRUE))[1]
+  train[[col]][is.na(train[[col]])] <- mode_value
+  test[[col]][is.na(test[[col]])] <- mode_value
+}
+
+for (col in categorical_cols) {
+  levels <- union(levels(as.factor(train[[col]])), levels(as.factor(test[[col]])))
+  train[[col]] <- factor(train[[col]], levels = levels)
+  test[[col]] <- factor(test[[col]], levels = levels)
+}
+
+# Combine train and test data to remove single-level columns
+all_data <- bind_rows(train, test)
+single_level_cols <- sapply(all_data, function(col) length(unique(col)) <= 1)
+all_data <- all_data[, !single_level_cols]
+
+# Separate train_x and test_x after removing single-level columns
+train_x <- all_data[1:nrow(train), ]
+test_x <- all_data[(nrow(train) + 1):nrow(all_data), ]
+
+# Convert categorical variables to dummy variables for model compatibility
+train_x <- model.matrix(~ . - 1, data = train_x)  # Remove intercept term
+test_x <- model.matrix(~ . - 1, data = test_x)
+
+```
+
+```{r build models}
+
+# LOG TRANSFORM - required
+train$SalePrice <- log(train$SalePrice)
+train_x <- train %>% select(-SalePrice, -Id)
+train_y <- train$SalePrice
+test_x <- test %>% select(-Id)
+
+# Identify and remove columns with only one unique level in either train_x or test_x
+all_data <- bind_rows(train_x, test_x)  # Combine train and test to apply consistent encoding
+single_level_cols <- sapply(all_data, function(col) length(unique(col)) <= 1)
+all_data <- all_data[, !single_level_cols]
+
+# Separate train_x and test_x after removing single-level columns
+train_x <- all_data[1:nrow(train), ]
+test_x <- all_data[(nrow(train) + 1):nrow(all_data), ]
+
+# Convert categorical variables to dummy variables for model compatibility
+train_x <- model.matrix(~ . - 1, data = train_x)
+test_x <- model.matrix(~ . - 1, data = test_x)
+# CV HERE
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 3)
+
+# MODEL 1 - LASSO HERE 
+lasso_model <- train(train_x, train_y, method = "glmnet",
+  tuneGrid = expand.grid(alpha = 1, lambda = seq(0.001, 0.1, length = 10)), trControl = train_control)
+
+# MODEL 2 - LINEAR HERE
+lm_model <- train(train_x, train_y, method = "lm", trControl = train_control)
+
+# MODEL 3 = BOOSTING
+xgb_grid <- expand.grid(nrounds = 100, eta = 0.1, max_depth = 6, gamma = 0, colsample_bytree = 0.7, min_child_weight = 1, subsample = 0.7)
+
+xgb_model <- train(train_x, train_y, method = "xgbTree", tuneGrid = xgb_grid, trControl = train_control)
+```
+
+```{r predicting}
+best_model <- xgb_model 
+
+test_preds <- predict(best_model, newdata = test_x)
+
+# Convert predictions back from log scale
+final_preds <- exp(test_preds)
+
+# Prepare submission file
+submission <- data.frame(Id = test$Id, SalePrice = final_preds)
+submission
+```
+
+# AVERAGING 
+```{r model averaging}
+# Generate predictions from each model
+lm_preds <- predict(lm_model, newdata = test_x)
+lasso_preds <- predict(lasso_model, newdata = test_x)
+xgb_preds <- predict(xgb_model, newdata = test_x)
+
+# Averaging predictions
+test_preds <- (lm_preds + lasso_preds + xgb_preds) / 3
+
+# Convert predictions back from log scale
+final_preds_averaging <- exp(test_preds)
+```
+
+
+```{r submit}
+submission <- data.frame(Id = test$Id, SalePrice = final_preds)
+submission_w_averaging <- data.frame(Id = test$Id, SalePrice = final_preds_averaging)
+
+submission_w_averaging <- data.frame(Id = test$Id, SalePrice = final_preds_averaging)
+
+
+write.csv(submission_w_averaging, "dane_submission_w_averaging.csv", row.names = FALSE)
+```
+
+Note: Check out the [Kaggle notebooks](https://www.kaggle.com/docs/notebooks) which let you make submissions directly from the notebook. Its very similar to using Rivanna's OnDemand in that you can make a RMarkdown/Jupyter notebook or R/Python scrips that run on the cloud. Free CPU (4 cores, 30GB RAM) - amazing! Let your laptops cool off after all their hard work this semester.  
+
+
+

@@ -1,0 +1,227 @@
+---
+title: "Homework #6: SVM and Calibration" 
+author: "Kiana Dane"
+format: ds6030hw-html
+---
+
+```{r config, include=FALSE}
+# Set global configurations and settings here
+knitr::opts_chunk$set()                 # set global chunk options
+ggplot2::theme_set(ggplot2::theme_bw()) # set ggplot2 theme
+```
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages, message=FALSE, warning=FALSE}
+dir_data= 'https://mdporter.github.io/teaching/data/' # data directory
+library(tidyverse)  # functions for data manipulation 
+library(pROC)
+library(ggplot2)
+library(dplyr)
+```
+
+
+# COMPAS Recidivism Prediction
+
+A recidivism risk model called COMPAS was the topic of a [ProPublica article](https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing/) on ML bias. Because the data and notebooks used for article was released on [github](https://github.com/propublica/compas-analysis), we can also evaluate the prediction bias (i.e., calibration). 
+
+This code will read in the *violent crime* risk score and apply the filtering used in the [analysis](https://github.com/propublica/compas-analysis/blob/master/Compas%20Analysis.ipynb).
+```{r, message=FALSE}
+#| code-fold: true
+library(tidyverse)
+df = read_csv("https://raw.githubusercontent.com/propublica/compas-analysis/master/compas-scores-two-years-violent.csv")
+
+risk = df %>% 
+  filter(days_b_screening_arrest <= 30) %>%
+  filter(days_b_screening_arrest >= -30) %>% 
+  filter(is_recid != -1) %>%
+  filter(c_charge_degree != "O") %>%
+  filter(v_score_text != 'N/A') %>% 
+  transmute(
+    age, age_cat,
+    charge = ifelse(c_charge_degree == "F", "Felony", "Misdemeanor"),
+    race,
+    sex,                 
+    priors_count = priors_count...15,
+    score = v_decile_score,              # the risk score {1,2,...,10}
+    outcome = two_year_recid...53        # outcome {1 = two year recidivate}
+  )
+```
+
+The `risk` data frame has the relevant information for completing the problems.
+
+
+
+# Problem 1: COMPAS risk score
+
+
+## a. Risk Score and Probability (table)
+
+Assess the predictive bias in the COMPAS risk scores by evaluating the probability of recidivism, e.g. estimate $\Pr(Y = 1 \mid \text{Score}=x)$. Use any reasonable techniques (including Bayesian) to estimate the probability of recidivism for each risk score. 
+
+Specifically, create a table (e.g., data frame) that provides the following information:
+
+- The COMPASS risk score.
+- The point estimate of the probability of recidivism for each risk score.
+- 95% confidence or credible intervals for the probability (e.g., Using normal theory, bootstrap, or Bayesian techniques).
+
+Indicate the choices you made in estimation (e.g., state the prior if you used Bayesian methods).
+
+::: {.callout-note title="Solution"}
+
+I chose to use the Bayesian method to estimate the probability of recidivism for all ten risk scores. I chose to set alpha and beta both equal to 1 to observe the performance of the model with a weak prior, which enables the data to influence p hat without preference.
+
+```{r prob 1a part i}
+bayesian_estimate <- function(recidivated, cases, a = 1, b = 1) 
+  {alpha <- a + recidivated
+  beta <- b + (cases - recidivated)
+  # take sample
+  sample <- rbeta(1000, alpha, beta)
+  
+  sample_mean <- mean(sample)
+  
+  lower_conf <- quantile(sample, 0.025)
+  upper_conf <- quantile(sample, 0.975)
+  
+  return(list(sample_mean = sample_mean, lower_conf = lower_conf, upper_conf = upper_conf))
+}
+```
+
+```{r prob 1a part ii}
+b_estimate_results <- risk %>%
+  group_by(score) %>%
+  summarize(
+    recidivated = sum(outcome == 1),
+    cases = n(),       
+    b_estimate = list(bayesian_estimate(sum(outcome == 1), n()))) %>%
+  mutate(
+    pos_mean = sapply(b_estimate, function(x) x$sample_mean),
+    low_ci = sapply(b_estimate, function(x) x$lower_conf),
+    up_ci = sapply(b_estimate, function(x) x$upper_conf)
+  ) %>%
+  select(score, pos_mean, low_ci, up_ci)
+
+print(b_estimate_results)
+```
+
+:::
+
+## b. Risk Score and Probability (plot)
+
+::: {.callout-note title="Solution"}
+```{r}
+ggplot(b_estimate_results, aes(x = score, y = pos_mean)) +
+  geom_line(color = "blue") + 
+  geom_ribbon(aes(ymin = low_ci, ymax = up_ci), fill = "orange", alpha = 0.4) + 
+  geom_point(size = 3, color = "darkblue") +
+  labs(
+    title = "Est. Probability of Recidivism - COMPAS",
+    x = "Risk score - COMPAS",
+    y = "Est. prob. of recidivism"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = 1:10)  
+```
+
+:::
+
+## c. Risk Score and Probability (by race)
+
+Repeat the analysis, but this time do so for every race. Produce a set of plots (one per race) and comment on the patterns. 
+
+
+::: {.callout-note title="Solution"}
+```{r}
+race_groups <- risk %>%
+  group_by(race, score) %>%
+  summarize(
+    recidivated = sum(outcome == 1),
+    cases = n(),
+    b_estimate = list(bayesian_estimate(sum(outcome == 1), n()))
+  ) %>%
+  mutate(
+    pos_mean = sapply(b_estimate, function(x) x$sample_mean),
+    low_ci = sapply(b_estimate, function(x) x$lower_conf),
+    up_ci = sapply(b_estimate, function(x) x$upper_conf)
+  ) %>%
+  ungroup()  %>%
+  filter(!is.na(pos_mean))
+
+race_groups
+
+```
+
+```{r prob 1c - one plot per race}
+race_plots <- race_groups %>%
+  split(.$race) %>%
+  lapply(function(risk) {
+    ggplot(risk, aes(x = score, y = pos_mean)) +
+      geom_line(color = "navy") +
+      geom_ribbon(aes(ymin = low_ci, ymax = up_ci), fill = "orange", alpha = 0.4) +
+      geom_point(color = "darkblue") +
+      labs(
+        title = paste("Est. Probability of Recidivism - COMPAS - ", unique(risk$race)),
+        x = "COMPAS risk score",
+        y = "Est. prob. of recidivism"
+      ) +
+      theme_minimal() +
+      scale_x_continuous(breaks = 1:10)
+  })
+
+race_plots
+```
+Of the 5 races (and "other" category) identified in the Risk data, there are a few insights that stand out upon visualizing the trends with their margins of error. These margins of error are largely due to the availability of observations of each non-white race, which is diminished compared to the availability of observations of white people. This is evident in the "white" plot, which has visibly the narrowest margin of error out of all the plots, indicating that the model is much more confident about this estimate than estimates for other races. 
+The plot with the most fluctuation (besides "other) appears to be the plot for Hispanic people. Much larger jumps at higher risk levels indicate that the model is not performing well in predicting the risk of recidivism among Hispanic people. 
+
+
+:::
+
+## d. ROC Curves
+
+Use the raw COMPAS risk scores to make a ROC curve for each race. 
+
+- Are the best discriminating models the ones you expected? 
+- Are the ROC curves helpful in evaluating the COMPAS risk score? 
+
+::: {.callout-note title="Solution"}
+```{r prob 1d}
+
+races <- unique(risk$race)
+
+roc_data_list <- list()
+
+for (race in races) {
+  race_groups2 <- risk %>% filter(race == !!race)
+  
+  y_actual <- race_groups2$outcome
+  y_score <- race_groups2$score
+  
+  roccurve <- roc(y_actual, y_score)
+  
+  roc_data_list[[race]] <- data.frame(
+    fpr = rev(roccurve$specificities),  # False positive rate (1 - specificity)
+    tpr = rev(roccurve$sensitivities),  # True positive rate (sensitivity)
+    race = race,
+    auc = rep(auc(roccurve))
+  )
+}
+
+df_roc <- do.call(rbind, roc_data_list)
+
+ggplot(df_roc, aes(x = fpr, y = tpr, color = race)) +
+  geom_line() +
+  geom_abline() + 
+  labs(
+    title = "ROC - Race",
+    x = "FPR",
+    y = "TPR"
+  ) +
+  scale_color_discrete(name = "Race") +
+  theme_minimal()
+```
+
+
+:::
+
+
+

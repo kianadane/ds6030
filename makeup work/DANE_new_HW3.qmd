@@ -1,0 +1,243 @@
+---
+title: "Homework #3: Penalized Regression" 
+author: "Kiana Dane"
+output: html document
+---
+
+# Required R packages and Directories {.unnumbered .unlisted}
+
+```{r packages, message=FALSE, warning=FALSE}
+data_dir = 'https://mdporter.github.io/teaching/data/' # data directory
+library(mlbench)
+library(glmnet)
+library(tidymodels)# for optional tidymodels solutions
+library(tidyverse) # functions for data manipulation  
+```
+
+# Problem 1: Optimal Tuning Parameters
+
+In cross-validation, we discussed choosing the tuning parameter values that minimized the cross-validation error. Another approach, called the "one-standard error" rule [ISL pg 214, ESL pg 61], uses the values corresponding to the least complex model whose cv error is within one standard error of the best model. The goal of this assignment is to compare these two rules.
+
+Use simulated data from `mlbench.friedman1(n, sd=2)` in the `mlbench` R package to fit *lasso models*. The tuning parameter $\lambda$ (corresponding to the penalty on the coefficient magnitude) is the one we will focus one. Generate training data, use k-fold cross-validation to get $\lambda_{\rm min}$ and $\lambda_{\rm 1SE}$, generate test data, make predictions for the test data, and compare performance of the two rules under a squared error loss using a hypothesis test.
+
+
+Choose reasonable values for:
+
+- Number of cv folds ($K$)
+    - Note: you are free to use repeated CV, repeated hold-outs, or bootstrapping instead of plain cross-validation; just be sure to describe what do did so it will be easier to follow.
+- Number of training and test observations
+- Number of simulations
+- If everyone uses different values, we will be able to see how the results change over the different settings.
+- Don't forget to make your results reproducible (e.g., set seed)
+
+## a. Code for the simulation and performance results
+
+::: {.callout-note title="Solution"}
+```{r lasso }
+library(mlbench)
+library(glmnet)
+library(dplyr)
+
+#-- Settings
+n_train = 2000      # number of training obs
+n_test = 100000        # number of test obs
+K = 10              # number of CV folds
+alpha = 1        # glmnet tuning alpha (1 = lasso, 0 = ridge)
+M = 100          # number of simulations
+
+#-- Data Generating Function
+getData <- function(n) {
+  data <- mlbench.friedman1(n, sd=2)
+  list(X = as.matrix(data$x), y = data$y)
+}
+
+#-- Simulations
+set.seed(123)
+
+min_sq_err <- numeric(M)
+se1_sq_err <- numeric(M)
+
+for(m in 1:M) {
+  
+  train_data <- getData(n_train)
+  X_train <- train_data$X
+  y_train <- train_data$y
+  
+  # using regular cross-validation 
+  cv <- cv.glmnet(X_train, y_train, alpha = alpha, nfolds = K)
+  
+  lambda_min <- cv$lambda.min
+  lambda_se1 <- cv$lambda.1se
+  
+  #4
+  test_data <- getData(n_test)
+  X_test <- test_data$X
+  y_test <- test_data$y
+  
+  #5 make predictions
+  y_pred_min <- predict(cv, s = lambda_min, newx = X_test)
+  y_pred_1se <- predict(cv, s = lambda_se1, newx = X_test)
+
+ #6. calc mse
+  min_sq_err[m] <- mean((y_test - y_pred_min)^2)
+  se1_sq_err[m] <- mean((y_test - y_pred_1se)^2)
+}
+
+#t test compare
+t_test_result <- t.test(min_sq_err, se1_sq_err, paired = TRUE)
+
+cat("Avg. SE (lambda_min):", mean(min_sq_err), "\n")
+cat("Avg. SE (lambda_1SE):", mean(se1_sq_err), "\n")
+print(t_test_result)
+```
+
+:::
+
+## b. Hypothesis test
+
+Provide results and discussion of a hypothesis test comparing $\lambda_{\rm min}$ and $\lambda_{\rm 1SE}$.
+
+::: {.callout-note title="Solution"}
+
+Null H - (H0): There is no significant difference in squared error between the model using lambda_min and the model using lambda_1SE.
+
+Alt H - (H1): There is a significant difference in squared error between the model using lambda_min and the model using lambda_1SE.
+
+Results: 
+The very low, near-zero p-value < 2.2e-16 suggests that the difference in squared error between lambda_min and lambda_1se is statistically significant, so we can reject the null hypothesis.
+
+:::
+
+# Problem 2 Prediction Contest: Real Estate Pricing
+
+This problem uses the [realestate-train](`r file.path(data_dir, 'realestate-train.csv')`) and [realestate-test](`r file.path(data_dir, 'realestate-test.csv')`) (click on links for data).
+
+The goal of this contest is to predict sale price (in thousands) (`price` column) using an *elastic net* model. Evaluation of the test data will be based on the root mean squared error ${\rm RMSE}= \sqrt{\frac{1}{m}\sum_i (y_i - \hat{y}_i)^2}$ for the $m$ test set observations.
+
+
+## a. Load and pre-process data
+
+Load the data and create necessary data structures for running *elastic net*.
+
+- You are free to use any data transformation or feature engineering
+- Note: there are some categorical predictors so at the least you will have to convert those to something numeric (e.g., one-hot or dummy coding).
+
+::: {.callout-note title="Solution"}
+```{r elastic net}
+train_data <- read.csv("realestate-train.csv")
+test_data <- read.csv("realestate-test.csv")
+
+str(train_data)
+
+train_data <- train_data %>%
+  mutate(across(where(is.character), as.factor))
+
+test_data <- test_data %>%
+  mutate(across(where(is.character), as.factor))
+
+# model matrix for elastic net
+# dummy variables for categorical predictors
+X_train <- model.matrix(price ~ ., data = train_data)[, -1]
+y_train <- train_data$price
+
+X_test <- model.matrix(~ ., data = test_data)[, -1] 
+```
+
+:::
+
+## b. Fit elastic net model
+
+Use an *elastic net* model to predict the `price` of the test data.
+
+- You are free to use any data transformation or feature engineering
+- You are free to use any tuning parameters
+- Report the $\alpha$ and $\lambda$ parameters you used to make your final predictions.
+- Describe how you choose those tuning parameters
+
+::: {.callout-note title="Solution"}
+```{r}
+library(ggplot2)
+
+alpha <- 0.5
+# using regular cross validation and
+set.seed(123)
+cv_fit <- cv.glmnet(X_train, y_train, alpha = alpha)
+cv_data <- data.frame(
+  lambda = cv_fit$lambda,
+  mean_mse = cv_fit$cvm,
+  mse_upper = cv_fit$cvm + cv_fit$cvsd,
+  mse_lower = cv_fit$cvm - cv_fit$cvsd
+)
+# final
+y_pred <- predict(cv_fit, s = cv_fit$lambda.min, newx = X_test)
+# Convert to matrix
+y_pred <- matrix(y_pred, ncol = 1)
+
+ggplot(cv_data, aes(x = log(lambda), y = mean_mse)) +
+  geom_line(color = "green") +
+  geom_ribbon(aes(ymin = mse_lower, ymax = mse_upper), alpha = 0.2) +
+  # label lambda min point on log lambda scale
+  annotate("point", x = log(cv_fit$lambda.min), y = cv_fit$cvm[cv_fit$lambda == cv_fit$lambda.min], 
+           color = "navy") +
+  annotate("text", x = log(cv_fit$lambda.min), 
+           y = cv_fit$cvm[cv_fit$lambda == cv_fit$lambda.min], 
+           label = "lambda.min", vjust = -1, color = "black") +
+  # label lambda 1se point on log lambda scale
+  annotate("point", x = log(cv_fit$lambda.1se), y = cv_fit$cvm[cv_fit$lambda == cv_fit$lambda.1se], 
+           color = "hotpink") +
+  annotate("text", x = log(cv_fit$lambda.1se), 
+           y = cv_fit$cvm[cv_fit$lambda == cv_fit$lambda.1se], 
+           label = "lambda.1se", vjust = -1, color = "black") +
+  
+  labs(
+    title = "CV MSE - Elastic Net",
+    x = "log lambda",
+    y = "Mean CV MSE"
+  ) +
+  theme_minimal()
+```
+
+	## 1.	Alpha Parameter:
+	•	Value: The alpha parameter used in the elastic net model was set to 0.5.
+	•	alpha value exactly between 0 and 1 creates a balance between lasso and ridge
+	•	justification: setting alpha = 0.5 provides a balance that leverages 50% of both methods to prevent overfitting while still maintaining accuracy.
+	
+	## 2.	Lambda Parameter:
+	•	Value: The lambda parameter was based on lambda_min, which minimizes the cross-validation error
+	•	lambda_min is the lambda value from cross-validation that yields the MSE and represents the model with the best predictive accuracy
+	•	lambda_1SE, an alternative, provides a more conservative choice by choosing the largest lambda within one standard error of lambda_min.
+	•	justification: After running 10-fold cross-validation on the training data, lambda_min was chosen because it produced the lowest error. 
+	
+:::
+
+## c. Submit predictions
+
+Submit a .csv file (ensure comma separated format) named `lastname_firstname.csv` that includes your predictions in a column named *yhat*. We will use automated evaluation, so the format must be exact.
+
+- You will receive credit for a proper submission; the top five scores will receive 2 bonus points.
+
+::: {.callout-note title="Solution"}
+```{r}
+
+y_pred <- as.numeric(y_pred)
+
+submission <- data.frame(yhat = y_pred)
+
+write.csv(submission, "dane_kiana.csv", row.names = FALSE)
+```
+
+:::
+
+## d. Report anticpated performance
+
+Report the anticipated performance of your method in terms of RMSE. We will see how close your performance assessment matches the actual value. 
+
+::: {.callout-note title="Solution"}
+```{r}
+lambda_min <- cv_fit$lambda.min
+cv_rmse <- sqrt(min(cv_fit$cvm)) 
+
+cat("Estimated RMSE based on cross-validation:", cv_rmse, "\n")
+```
+
+:::
